@@ -7,10 +7,13 @@ Space**. Written in Swift, builds without Xcode.
 
 ## Download
 
-Every push builds the app on CI: open the
+**[Download the latest release](https://github.com/uavn/tab-stash/releases/latest/download/TabStash.zip)**
+— that link never changes; it always serves the newest tagged build.
+
+Every push also builds the app on CI: open the
 [Actions](https://github.com/uavn/tab-stash/actions) tab, pick a run and download the
-**TabStash** artifact. Tagged versions (`v1.0` and so on) also appear under
-[Releases](https://github.com/uavn/tab-stash/releases).
+**TabStash** artifact (needs a GitHub login, kept for 90 days). Tagged versions are
+published under [Releases](https://github.com/uavn/tab-stash/releases).
 
 CI builds are signed ad-hoc, not notarized, so macOS quarantines them:
 
