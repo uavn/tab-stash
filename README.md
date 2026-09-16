@@ -1,7 +1,11 @@
 # TabStash
 
-A Cmd+Tab replacement for macOS that shows **only the apps with windows on the current
-Space**. Written in Swift, builds without Xcode.
+**A Cmd+Tab you can configure.**
+
+Lists only the apps and windows on the Space you are on — or every Space, if you prefer
+it that way. Windows separately or grouped, minimized ones shown or hidden, ordered by
+recent use or by name, with anything you never switch to left out for good.
+Written in Swift, builds without Xcode.
 
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue) ![Swift](https://img.shields.io/badge/Swift-5-orange)
 
