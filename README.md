@@ -44,4 +44,4 @@ changed, and what had to be given up.
 
 ## License
 
-GPL
+GPL-3.0 — see [LICENSE](LICENSE).
