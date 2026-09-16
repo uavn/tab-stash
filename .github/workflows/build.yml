@@ -1,0 +1,42 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Apple Silicon runner: build.sh compiles an arm64 helper and runs it to draw the icon.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: zsh build.sh
+
+      - name: Zip the app
+        # ditto keeps the bundle structure and symlinks that a plain zip would flatten.
+        run: ditto -c -k --sequesterRsrc --keepParent build/TabStash.app TabStash.zip
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: TabStash
+          path: TabStash.zip
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" TabStash.zip \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Built by CI from $GITHUB_SHA. Unsigned: after unzipping run
+          xattr -dr com.apple.quarantine TabStash.app"

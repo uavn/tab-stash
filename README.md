@@ -5,6 +5,22 @@ Space**. Written in Swift, builds without Xcode.
 
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue) ![Swift](https://img.shields.io/badge/Swift-5-orange)
 
+## Download
+
+Every push builds the app on CI: open the
+[Actions](https://github.com/uavn/tab-stash/actions) tab, pick a run and download the
+**TabStash** artifact. Tagged versions (`v1.0` and so on) also appear under
+[Releases](https://github.com/uavn/tab-stash/releases).
+
+CI builds are signed ad-hoc, not notarized, so macOS quarantines them:
+
+```sh
+xattr -dr com.apple.quarantine TabStash.app
+```
+
+Because an ad-hoc signature changes with every build, the Accessibility grant has to be
+given again after each download. Building locally with `./make-cert.sh` avoids that.
+
 ## Build
 
 ```sh
