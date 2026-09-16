@@ -44,4 +44,4 @@ changed, and what had to be given up.
 
 ## License
 
-MIT
+GPL
