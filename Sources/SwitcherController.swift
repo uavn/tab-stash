@@ -12,6 +12,10 @@ final class SwitcherController {
     private var mru: [pid_t] = []
     /// Most recently activated windows, newest first, for switching inside one app.
     private var windowMRU: [CGWindowID] = []
+    /// Accessibility lookups done in the background, away from key handling.
+    private let axQueue = DispatchQueue(label: "dev.artem.tabstash.focus", qos: .utility)
+    /// Watches Cmd while the switcher is open, in case its release goes missing.
+    private var releaseWatch: Timer?
     private var observer: NSObjectProtocol?
 
     init() {
@@ -39,14 +43,16 @@ final class SwitcherController {
     /// Records the window an app was activated with, so switching by mouse counts
     /// towards the window order too, not only picks made here.
     private func noteFocusedWindow(of pid: pid_t) {
-        let appElement = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appElement, 0.3)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value) == .success,
-              let raw = value, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return }
-        var wid: CGWindowID = 0
-        guard _AXUIElementGetWindow(raw as! AXUIElement, &wid) == .success, wid != 0 else { return }
-        noteWindow(wid)
+        axQueue.async { [weak self] in
+            let appElement = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(appElement, 0.3)
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value) == .success,
+                  let raw = value, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return }
+            var wid: CGWindowID = 0
+            guard _AXUIElementGetWindow(raw as! AXUIElement, &wid) == .success, wid != 0 else { return }
+            DispatchQueue.main.async { self?.noteWindow(wid) }
+        }
     }
 
     private func noteWindow(_ wid: CGWindowID) {
@@ -56,6 +62,11 @@ final class SwitcherController {
     }
 
     func handleCmdTab(reverse: Bool) {
+        if isActive && !panel.isVisible {
+            // Left "open" by a Cmd release that never arrived: start over rather than move
+            // a selection nobody can see, which used to last until a restart.
+            isActive = false
+        }
         if !isActive {
             apps = SpaceApps.currentSpaceApps(mru: mru, windowMRU: windowMRU)
             guard !apps.isEmpty else { return }
@@ -69,6 +80,7 @@ final class SwitcherController {
                 selected = firstIsFront && apps.count > 1 ? 1 : 0
             }
             panel.show(apps: apps, selected: selected)
+            watchForRelease()
         } else {
             move(reverse ? -1 : 1)
         }
@@ -92,7 +104,18 @@ final class SwitcherController {
         }
     }
 
+    /// Secure input fields and tap hiccups can swallow the Cmd key-up; checking the
+    /// real modifier state closes the switcher anyway.
+    private func watchForRelease() {
+        releaseWatch?.invalidate()
+        releaseWatch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, self.isActive else { return }
+            if !CGEventSource.flagsState(.combinedSessionState).contains(.maskCommand) { self.commit() }
+        }
+    }
+
     func commit() {
+        releaseWatch?.invalidate()
         guard isActive else { return }
         isActive = false
         panel.hide()
@@ -101,6 +124,7 @@ final class SwitcherController {
     }
 
     func cancel() {
+        releaseWatch?.invalidate()
         isActive = false
         panel.hide()
     }

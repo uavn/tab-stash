@@ -36,10 +36,16 @@ enum SpaceApps {
     /// Notes the windows Accessibility vouches for right now. Worth calling whenever an
     /// app activates: it is then on the Space in front, the only time Accessibility says
     /// anything about it, and the answer stays useful from other Spaces.
+    /// Runs off the main thread: a busy app can take its time answering, and that must
+    /// never hold up key handling.
     static func rememberWindows(of pid: pid_t) {
-        guard let ax = axWindows(pid: pid), !ax.isEmpty else { return }
-        confirmedWindows[pid] = Set(ax.keys)
+        axQueue.async {
+            guard let ax = axWindows(pid: pid), !ax.isEmpty else { return }
+            let ids = Set(ax.keys)
+            DispatchQueue.main.async { confirmedWindows[pid] = ids }
+        }
     }
+    private static let axQueue = DispatchQueue(label: "dev.artem.tabstash.ax", qos: .utility)
 
     /// Apps (or single windows, when grouping is off) the switcher should offer.
     /// `mru` orders the apps, `windowMRU` orders the windows inside one app.
@@ -94,15 +100,27 @@ enum SpaceApps {
             // answers about the Space in front only - hence the remembered set, which
             // makes the same judgement possible from another Space. An app we have never
             // heard from keeps all its windows: better an extra entry than a lost one.
-            var axTitles: [CGWindowID: String] = [:]
-            if windows.contains(where: { !$0.onscreen }) || !settings.groupWindows {
-                axTitles = axWindows(pid: pid) ?? [:]
-                if !axTitles.isEmpty { confirmedWindows[pid] = Set(axTitles.keys) }
+            var axAnswer: [CGWindowID: String]?
+            // Only apps with a window on this Space are worth asking: Accessibility never
+            // answers about the others, it only makes them wait.
+            let hereToo = windows.contains { !$0.elsewhere }
+            if hereToo, windows.contains(where: { !$0.onscreen }) || !settings.groupWindows {
+                axAnswer = axWindows(pid: pid)
+                if let answer = axAnswer, !answer.isEmpty { confirmedWindows[pid] = Set(answer.keys) }
             }
+            let axTitles = axAnswer ?? [:]
             var visible = windows
             let confirmed = confirmedWindows[pid] ?? []
             if !confirmed.isEmpty {
                 visible = visible.filter { $0.onscreen || $0.title != nil || confirmed.contains($0.wid) }
+            }
+            // Accessibility still lists a minimised window (checked with TextEdit and
+            // Telegram). A window here that is neither on screen nor listed has been put
+            // away - the closed main window of a tray app such as Macs Fan Control - so there
+            // is nothing to switch to. Apps hidden with Cmd+H are the exception:
+            // Accessibility lists nothing for them until they are shown again.
+            if let answer = axAnswer, !app.isHidden {
+                visible = visible.filter { $0.onscreen || $0.elsewhere || answer[$0.wid] != nil }
             }
             guard !visible.isEmpty else { continue }
             // Present = on this Space, or on another one; only the rest is minimised.
@@ -259,15 +277,24 @@ enum SpaceApps {
                 + "\(Int(width))x\(Int(height)) onscreen=\((w[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false) "
                 + "spaces=\(PrivateSpaces.spaceIDs(forWindow: wid).sorted()) title='\(title)'")
         }
+        func ms(_ start: Date) -> String { String(format: "%.0f ms", Date().timeIntervalSince(start) * 1000) }
         for pid in pids.sorted() {
             let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?"
-            switch axWindows(pid: pid) {
-            case nil: out.append("ax pid=\(pid) \(name): no answer")
-            case let map?: out.append("ax pid=\(pid) \(name): \(map.isEmpty ? "empty" : map.map { "\($0.key)='\($0.value)'" }.joined(separator: ", "))")
+            let started = Date()
+            let answer = axWindows(pid: pid)
+            let took = ms(started)
+            switch answer {
+            case nil: out.append("ax pid=\(pid) \(name): no answer (\(took))")
+            case let map?: out.append("ax pid=\(pid) \(name): \(map.isEmpty ? "empty" : "\(map.count) windows") (\(took))")
             }
         }
-        out.append("--- result ---")
-        for item in currentSpaceApps(mru: []) {
+        let focusStart = Date()
+        _ = focusedWindowOfFrontApp()
+        out.append("focused window lookup: \(ms(focusStart))")
+        let listStart = Date()
+        let items = currentSpaceApps(mru: [])
+        out.append("--- result (built in \(ms(listStart))) ---")
+        for item in items {
             out.append("\(item.name) wids=\(item.windowIDs) minimized=\(item.isMinimized) title=\(item.title ?? "<nil>")")
         }
         let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/TabStash-dump.txt")

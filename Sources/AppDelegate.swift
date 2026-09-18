@@ -12,8 +12,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var promptedForPermission = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Cap every Accessibility call in the app. Window elements otherwise wait up to
+        // six seconds on a busy app, and such waits held up key handling for seconds.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.2)
         buildStatusItem()
         wireTap()
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.tap.ensureEnabled()
+        }
         startTapWhenPossible()
         if CommandLine.arguments.contains("--settings") { settingsWindow.show() }
     }

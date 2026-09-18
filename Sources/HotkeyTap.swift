@@ -40,6 +40,12 @@ final class HotkeyTap {
         return true
     }
 
+    /// Re-enables the tap if macOS switched it off and the notice got lost.
+    func ensureEnabled() {
+        guard let tap, !CGEvent.tapIsEnabled(tap: tap) else { return }
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
     func stop() {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         tap = nil
