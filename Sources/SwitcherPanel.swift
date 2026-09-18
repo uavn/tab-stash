@@ -22,6 +22,13 @@ final class SwitcherPanel: NSPanel {
     private var items: [ItemView] = []
     private var apps: [SpaceApp] = []
 
+    /// Pointer moved onto an item / clicked one.
+    var onHover: ((Int) -> Void)?
+    var onClick: ((Int) -> Void)?
+    /// Where the pointer was when the panel opened: it may be resting where an item
+    /// appears, and that alone must not change the selection.
+    private var pointerAtShow = NSPoint.zero
+
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
@@ -31,7 +38,7 @@ final class SwitcherPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
-        ignoresMouseEvents = true
+        acceptsMouseMovedEvents = true
 
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = .labelColor
@@ -106,6 +113,8 @@ final class SwitcherPanel: NSPanel {
         self.apps = apps
         items.forEach { $0.removeFromSuperview() }
         items = apps.map { ItemView(app: $0, iconSize: Metrics.icon) }
+        for (i, item) in items.enumerated() { item.index = i; item.owner = self }
+        pointerAtShow = NSEvent.mouseLocation
 
         let screen = targetScreen()
         let usable = screen.visibleFrame.width - 2 * Metrics.padding - 80
@@ -156,6 +165,15 @@ final class SwitcherPanel: NSPanel {
         orderOut(nil)
     }
 
+    fileprivate func pointerOver(_ index: Int) {
+        guard NSEvent.mouseLocation != pointerAtShow else { return }
+        onHover?(index)
+    }
+
+    fileprivate func clicked(_ index: Int) {
+        onClick?(index)
+    }
+
     private func targetScreen() -> NSScreen {
         let mouse = NSEvent.mouseLocation
         return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
@@ -166,6 +184,8 @@ final class SwitcherPanel: NSPanel {
 
 private final class ItemView: NSView {
     private let imageView = NSImageView()
+    var index = 0
+    weak var owner: SwitcherPanel?
 
     var isSelected = false {
         didSet { applyHighlight() }
@@ -202,6 +222,79 @@ private final class ItemView: NSView {
             imageView.heightAnchor.constraint(equalToConstant: iconSize),
             imageView.centerXAnchor.constraint(equalTo: centerXAnchor),
             imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+
+        if let badge = Self.badge(for: app) {
+            badge.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(badge)
+            // Sits on the lower edge of the icon like a tag; a dot in the upper corner
+            // reads as an unread count.
+            NSLayoutConstraint.activate([
+                badge.centerXAnchor.constraint(equalTo: imageView.centerXAnchor),
+                badge.centerYAnchor.constraint(equalTo: imageView.bottomAnchor, constant: -4),
+            ])
+        }
+
+        addTrackingArea(NSTrackingArea(rect: .zero,
+                                       options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private static func badge(for app: SpaceApp) -> NSView? {
+        switch app.state {
+        case .normal: return nil
+        case .minimized: return StatusTag(symbol: "dock.arrow.down.rectangle", fallback: "minus")
+        case .hidden: return StatusTag(symbol: "eye.slash", fallback: "eye.slash")
+        case .otherSpace: return StatusTag(symbol: "arrow.right", fallback: "arrow.right",
+                                           text: app.spaceNumber.map(String.init))
+        }
+    }
+
+    // The panel never becomes key, so the first click has to count.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseEntered(with event: NSEvent) { owner?.pointerOver(index) }
+    override func mouseMoved(with event: NSEvent) { owner?.pointerOver(index) }
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) { owner?.clicked(index) }
+}
+
+/// Small dark tag on the lower edge of an icon: minimised, hidden, or "-> 2" for a
+/// window on desktop 2. Neutral on purpose, so it does not look like a notification.
+private final class StatusTag: NSView {
+    init(symbol: String, fallback: String, text: String? = nil) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 9
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        layer?.borderWidth = 0.5
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.3).cgColor
+
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 3
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 7, bottom: 0, right: 7)
+        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: fallback, accessibilityDescription: nil) {
+            let view = NSImageView(image: image)
+            view.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+            view.contentTintColor = .white
+            stack.addArrangedSubview(view)
+        }
+        if let text {
+            let label = NSTextField(labelWithString: text)
+            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+            label.textColor = .white
+            stack.addArrangedSubview(label)
+        }
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 18),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 

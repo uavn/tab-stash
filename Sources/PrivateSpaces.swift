@@ -59,4 +59,20 @@ enum PrivateSpaces {
         guard let spaces = f.spacesForWindows(f.mainConnection(), 7, arr)?.takeRetainedValue() as? [NSNumber] else { return [] }
         return Set(spaces.map { $0.uint64Value })
     }
+
+    private typealias OrderedInFn = @convention(c) (Int32, UInt32, UnsafeMutablePointer<Bool>) -> Int32
+    private static let orderedInFn: OrderedInFn? = {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
+              let symbol = dlsym(handle, "SLSWindowIsOrderedIn") else { return nil }
+        return unsafeBitCast(symbol, to: OrderedInFn.self)
+    }()
+
+    /// Whether a window is placed on its Space - true for a window on another desktop -
+    /// rather than put away: minimised, or closed into a menu-bar app's tray. nil when
+    /// the call is unavailable.
+    static func isOrderedIn(_ wid: CGWindowID) -> Bool? {
+        guard let f = fns, let fn = orderedInFn else { return nil }
+        var value = false
+        return fn(f.mainConnection(), wid, &value) == 0 ? value : nil
+    }
 }

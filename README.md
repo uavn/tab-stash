@@ -47,6 +47,11 @@ The app lives in the menu bar and needs Accessibility access
 | release Cmd | activate the selection |
 | Esc | close without switching |
 | Cmd+Q, Cmd+H | quit / hide the selected app |
+| Cmd+W, Cmd+M | close / minimize the selected window |
+| mouse | hover to select, click to switch |
+
+A small tag on the lower edge of an icon marks a minimized window, a hidden app, or a
+window on another Space (→ 2 for desktop 2).
 
 ## Settings
 

@@ -1,7 +1,8 @@
 import AppKit
 
-/// State machine: Cmd+Tab opens, Tab/Shift+Tab/arrows move, releasing Cmd commits,
-/// Esc cancels, Cmd+Q quits the highlighted app, Cmd+H hides it.
+/// State machine: Cmd+Tab opens, Tab/Shift+Tab/arrows or the pointer move, releasing Cmd
+/// or a click commits, Esc cancels. Cmd+Q quits the highlighted app, Cmd+H hides it,
+/// Cmd+W closes the highlighted window, Cmd+M minimises it.
 final class SwitcherController {
     private let panel = SwitcherPanel()
     private var apps: [SpaceApp] = []
@@ -28,6 +29,16 @@ final class SwitcherController {
             self.noteActivated(app.processIdentifier)
             SpaceApps.rememberWindows(of: app.processIdentifier)
             self.noteFocusedWindow(of: app.processIdentifier)
+        }
+        panel.onHover = { [weak self] index in
+            guard let self, self.isActive, index != self.selected, self.apps.indices.contains(index) else { return }
+            self.selected = index
+            self.panel.select(index)
+        }
+        panel.onClick = { [weak self] index in
+            guard let self, self.isActive, self.apps.indices.contains(index) else { return }
+            self.selected = index
+            self.commit()
         }
     }
 
@@ -68,7 +79,15 @@ final class SwitcherController {
             isActive = false
         }
         if !isActive {
+            let started = Date()
             apps = SpaceApps.currentSpaceApps(mru: mru, windowMRU: windowMRU)
+            let listMs = SlowLog.ms(since: started)
+            defer {
+                let total = SlowLog.ms(since: started)
+                if total > 150 {
+                    SlowLog.note("Cmd+Tab: \(total) ms (list \(listMs) ms, \(apps.count) entries)")
+                }
+            }
             guard !apps.isEmpty else { return }
             isActive = true
             // Skip the first item only when it is the app already in front.
@@ -98,6 +117,12 @@ final class SwitcherController {
         case 4 where flags.contains(.maskCommand):      // Cmd+H
             apps[selected].app.hide()
             removeSelected()
+            return true
+        case 13 where flags.contains(.maskCommand):     // Cmd+W
+            closeSelectedWindow()
+            return true
+        case 46 where flags.contains(.maskCommand):     // Cmd+M
+            minimizeSelectedWindow()
             return true
         default:
             return false
@@ -218,6 +243,45 @@ final class SwitcherController {
         for delay in [0.2, 0.5] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { _ = unminimise() }
         }
+    }
+
+    /// Cmd+W: presses the highlighted window's close button, exactly as a click would,
+    /// so apps still get to ask about unsaved changes.
+    private func closeSelectedWindow() {
+        guard apps.indices.contains(selected) else { return }
+        let item = apps[selected]
+        let appElement = AXUIElementCreateApplication(item.app.processIdentifier)
+        var button: CFTypeRef?
+        guard let window = axWindow(for: item, appElement: appElement),
+              AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &button) == .success,
+              let raw = button, CFGetTypeID(raw) == AXUIElementGetTypeID() else {
+            NSSound.beep()      // e.g. a window on another Space, which Accessibility cannot reach
+            return
+        }
+        var closed: CGWindowID = 0
+        _ = _AXUIElementGetWindow(window, &closed)
+        AXUIElementPerformAction(raw as! AXUIElement, kAXPressAction as CFString)
+
+        // A grouped entry keeps the app's other windows.
+        apps[selected].windowIDs.removeAll { $0 == closed }
+        if apps[selected].windowIDs.isEmpty { apps.remove(at: selected) }
+        if apps.isEmpty { cancel(); return }
+        selected = min(selected, apps.count - 1)
+        panel.show(apps: apps, selected: selected)
+    }
+
+    /// Cmd+M: minimises the highlighted window and leaves it in the list, marked.
+    private func minimizeSelectedWindow() {
+        guard apps.indices.contains(selected) else { return }
+        let item = apps[selected]
+        let appElement = AXUIElementCreateApplication(item.app.processIdentifier)
+        guard let window = axWindow(for: item, appElement: appElement) else {
+            NSSound.beep()
+            return
+        }
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        if item.windowIDs.count == 1 { apps[selected].isMinimized = true }
+        panel.show(apps: apps, selected: selected)
     }
 
     /// Finds the AX element of the app's frontmost window on the current Space.

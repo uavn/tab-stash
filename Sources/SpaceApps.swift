@@ -1,15 +1,29 @@
 import AppKit
 
 struct SpaceApp {
+    enum State { case normal, minimized, hidden, otherSpace }
+
     let app: NSRunningApplication
     /// Windows this entry stands for, front to back. Exactly one when grouping is off.
-    let windowIDs: [CGWindowID]
+    var windowIDs: [CGWindowID]
     /// True when nothing of this entry is visible (all minimised, or the app is hidden).
-    let isMinimized: Bool
+    var isMinimized: Bool
     /// Window title, set only when windows are listed separately.
     let title: String?
     /// False when this entry only has windows on other Spaces.
     let isOnCurrentSpace: Bool
+    /// Number of the desktop the entry lives on, as Mission Control counts them, when
+    /// that is not the current one.
+    let spaceNumber: Int?
+
+    /// What the badge on the icon says. Hidden wins over minimised, which wins over
+    /// "on another Space".
+    var state: State {
+        if app.isHidden { return .hidden }
+        if isMinimized { return .minimized }
+        if !isOnCurrentSpace { return .otherSpace }
+        return .normal
+    }
 
     var name: String { app.localizedName ?? "?" }
     /// Caption under the icon: the window title when windows are listed separately.
@@ -26,12 +40,22 @@ enum SpaceApps {
         let onscreen: Bool
         /// Lives on a Space that is not in front. Not on screen, but not minimised either.
         let elsewhere: Bool
+        /// The Space it belongs to, for the badge.
+        let space: UInt64?
+        /// Placed on its Space, as opposed to minimised or put away in a tray.
+        let orderedIn: Bool
         let title: String?
     }
 
     /// Window IDs Accessibility has confirmed for an app, remembered because it only
     /// answers about apps on the Space in front. Seen once, a window stays trustworthy.
     private static var confirmedWindows: [pid_t: Set<CGWindowID>] = [:]
+    /// Window titles from earlier answers, for when there is no time to ask again.
+    private static var titleCache: [CGWindowID: String] = [:]
+    /// All Accessibility work while building one list must fit in this. A slow app
+    /// answers each question within the per-call cap, but dozens of windows times that
+    /// cap once held Cmd+Tab up for 15 seconds.
+    private static let axBudget: TimeInterval = 0.15
 
     /// Notes the windows Accessibility vouches for right now. Worth calling whenever an
     /// app activates: it is then on the Space in front, the only time Accessibility says
@@ -40,9 +64,12 @@ enum SpaceApps {
     /// never hold up key handling.
     static func rememberWindows(of pid: pid_t) {
         axQueue.async {
-            guard let ax = axWindows(pid: pid), !ax.isEmpty else { return }
+            guard let ax = axWindows(pid: pid, deadline: Date().addingTimeInterval(1)), !ax.isEmpty else { return }
             let ids = Set(ax.keys)
-            DispatchQueue.main.async { confirmedWindows[pid] = ids }
+            DispatchQueue.main.async {
+                confirmedWindows[pid] = ids
+                for (wid, title) in ax where !title.isEmpty { titleCache[wid] = title }
+            }
         }
     }
     private static let axQueue = DispatchQueue(label: "dev.artem.tabstash.ax", qos: .utility)
@@ -53,6 +80,8 @@ enum SpaceApps {
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return [] }
 
+        let axDeadline = Date().addingTimeInterval(axBudget)
+        if titleCache.count > 2000 { titleCache.removeAll() }
         let settings = Settings.shared
         let hidden = settings.hiddenBundleIDs
         let limitToSpace = settings.currentSpaceOnly
@@ -60,6 +89,11 @@ enum SpaceApps {
         // away, not minimised, and must not be dropped with the minimised ones.
         let activeSpaces = PrivateSpaces.activeSpaceIDs()
         let usePrivate = !activeSpaces.isEmpty
+        // Desktop numbers as Mission Control counts them, for the "other Space" badge.
+        var desktopNumber: [UInt64: Int] = [:]
+        for display in PrivateSpaces.displaySpaces() {
+            for (i, id) in display.spaces.enumerated() { desktopNumber[id] = i + 1 }
+        }
 
         var entries: [pid_t: [WindowInfo]] = [:]
         var pidsInZOrder: [pid_t] = []
@@ -88,7 +122,9 @@ enum SpaceApps {
 
             let title = (w[kCGWindowName as String] as? String).flatMap { $0.isEmpty ? nil : $0 }
             if entries[pid] == nil { pidsInZOrder.append(pid) }
-            entries[pid, default: []].append(WindowInfo(wid: wid, onscreen: onscreen, elsewhere: elsewhere, title: title))
+            let orderedIn = onscreen || (PrivateSpaces.isOrderedIn(wid) ?? true)
+            entries[pid, default: []].append(WindowInfo(wid: wid, onscreen: onscreen, elsewhere: elsewhere,
+                                                        space: spaces.first, orderedIn: orderedIn, title: title))
         }
 
         var result: [SpaceApp] = []
@@ -100,31 +136,35 @@ enum SpaceApps {
             // answers about the Space in front only - hence the remembered set, which
             // makes the same judgement possible from another Space. An app we have never
             // heard from keeps all its windows: better an extra entry than a lost one.
+            // Which windows are real. On screen, or placed on another Space, always is.
+            // Anything else is out of sight - minimised, closed into a tray (Macs Fan
+            // Control), or an app's internal scaffolding (Chrome) - and needs vouching for.
+            // Accessibility vouches for minimised windows but answers only about the Space
+            // in front, so its answers are remembered for looking from other Spaces.
             var axAnswer: [CGWindowID: String]?
-            // Only apps with a window on this Space are worth asking: Accessibility never
-            // answers about the others, it only makes them wait.
             let hereToo = windows.contains { !$0.elsewhere }
             if hereToo, windows.contains(where: { !$0.onscreen }) || !settings.groupWindows {
-                axAnswer = axWindows(pid: pid)
-                if let answer = axAnswer, !answer.isEmpty { confirmedWindows[pid] = Set(answer.keys) }
+                if Date() < axDeadline { axAnswer = axWindows(pid: pid, deadline: axDeadline) }
+                if let answer = axAnswer {
+                    confirmedWindows[pid] = Set(answer.keys)
+                    for (wid, title) in answer where !title.isEmpty { titleCache[wid] = title }
+                }
             }
             let axTitles = axAnswer ?? [:]
-            var visible = windows
-            let confirmed = confirmedWindows[pid] ?? []
-            if !confirmed.isEmpty {
-                visible = visible.filter { $0.onscreen || $0.title != nil || confirmed.contains($0.wid) }
-            }
-            // Accessibility still lists a minimised window (checked with TextEdit and
-            // Telegram). A window here that is neither on screen nor listed has been put
-            // away - the closed main window of a tray app such as Macs Fan Control - so there
-            // is nothing to switch to. Apps hidden with Cmd+H are the exception:
-            // Accessibility lists nothing for them until they are shown again.
-            if let answer = axAnswer, !app.isHidden {
-                visible = visible.filter { $0.onscreen || $0.elsewhere || answer[$0.wid] != nil }
+            let known = confirmedWindows[pid]
+            // Asked and got no answer (a busy app): keep what is here rather than lose it.
+            let unanswered = hereToo && axAnswer == nil
+            func present(_ w: WindowInfo) -> Bool { w.onscreen || (w.elsewhere && w.orderedIn) }
+            let visible = windows.filter { win in
+                if present(win) { return true }
+                // Cmd+H: Accessibility lists nothing until the app is shown again.
+                if app.isHidden || (unanswered && known == nil && !win.elsewhere) { return true }
+                if win.title != nil { return true }
+                return known?.contains(win.wid) ?? false
             }
             guard !visible.isEmpty else { continue }
             // Present = on this Space, or on another one; only the rest is minimised.
-            let anyPresent = visible.contains { $0.onscreen || $0.elsewhere }
+            let anyPresent = visible.contains(where: present)
             let anyOnscreen = visible.contains { $0.onscreen }
             switch app.activationPolicy {
             case .regular: break
@@ -141,9 +181,11 @@ enum SpaceApps {
             }
 
             if settings.groupWindows {
+                let here = visible.contains { !$0.elsewhere }
                 result.append(SpaceApp(app: app, windowIDs: visible.map { $0.wid },
                                        isMinimized: appMinimized, title: nil,
-                                       isOnCurrentSpace: visible.contains { !$0.elsewhere }))
+                                       isOnCurrentSpace: here,
+                                       spaceNumber: here ? nil : visible.first?.space.flatMap { desktopNumber[$0] }))
                 continue
             }
             // One entry per window. kCGWindowName stays empty without Screen Recording
@@ -154,11 +196,12 @@ enum SpaceApps {
             // were dropped above, by Space membership and by the Accessibility check.
             let fallback = axTitles
             for win in visible {
-                let minimized = app.isHidden || !(win.onscreen || win.elsewhere)
+                let minimized = app.isHidden || !present(win)
                 if minimized && !settings.showMinimized { continue }
-                let title = (win.title ?? fallback[win.wid]).flatMap { $0.isEmpty ? nil : $0 }
+                let title = (win.title ?? fallback[win.wid] ?? titleCache[win.wid]).flatMap { $0.isEmpty ? nil : $0 }
                 result.append(SpaceApp(app: app, windowIDs: [win.wid], isMinimized: minimized,
-                                       title: title, isOnCurrentSpace: !win.elsewhere))
+                                       title: title, isOnCurrentSpace: !win.elsewhere,
+                                       spaceNumber: win.elsewhere ? win.space.flatMap { desktopNumber[$0] } : nil))
             }
         }
 
@@ -182,7 +225,7 @@ enum SpaceApps {
         // so the next Cmd+Tab lands on a different window instead of the current one.
         let rank: [pid_t: Int] = Dictionary(uniqueKeysWithValues: mru.enumerated().map { ($1, $0) })
         let windowRank: [CGWindowID: Int] = Dictionary(uniqueKeysWithValues: windowMRU.enumerated().map { ($1, $0) })
-        let focused = focusedWindowOfFrontApp()
+        let focused = focusedWindowOfFrontApp(deadline: axDeadline)
         func windowOrder(_ item: SpaceApp) -> Int {
             guard let wid = item.windowIDs.first else { return Int.max }
             if wid == focused { return -1 }
@@ -222,8 +265,8 @@ enum SpaceApps {
     /// Window IDs the app itself reports through Accessibility, with their titles.
     /// nil when the app does not answer, in which case nothing is filtered out.
     /// The window the user is actually in right now, so it can be put first.
-    private static func focusedWindowOfFrontApp() -> CGWindowID? {
-        guard let front = NSWorkspace.shared.frontmostApplication else { return nil }
+    private static func focusedWindowOfFrontApp(deadline: Date = .distantFuture) -> CGWindowID? {
+        guard Date() < deadline, let front = NSWorkspace.shared.frontmostApplication else { return nil }
         let appElement = AXUIElementCreateApplication(front.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
         var value: CFTypeRef?
@@ -234,7 +277,10 @@ enum SpaceApps {
         return wid
     }
 
-    private static func axWindows(pid: pid_t) -> [CGWindowID: String]? {
+    /// nil when the app gave no complete answer in time. A partial answer is never
+    /// returned: windows missing from it would be taken for fakes and dropped.
+    private static func axWindows(pid: pid_t, deadline: Date = .distantFuture) -> [CGWindowID: String]? {
+        let started = Date()
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
         var value: CFTypeRef?
@@ -242,11 +288,20 @@ enum SpaceApps {
               let windows = value as? [AXUIElement] else { return nil }
         var titles: [CGWindowID: String] = [:]
         for w in windows {
+            guard Date() < deadline else {
+                let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
+                SlowLog.note("Accessibility: \(name) ran out of time after \(SlowLog.ms(since: started)) ms, \(titles.count) of \(windows.count) windows")
+                return nil
+            }
             var wid: CGWindowID = 0
             guard _AXUIElementGetWindow(w, &wid) == .success else { continue }
             var raw: CFTypeRef?
             AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &raw)
             titles[wid] = (raw as? String) ?? ""
+        }
+        if Date().timeIntervalSince(started) > 0.1 {
+            let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
+            SlowLog.note("Accessibility: \(name) took \(SlowLog.ms(since: started)) ms for \(windows.count) windows")
         }
         return titles
     }
@@ -295,7 +350,7 @@ enum SpaceApps {
         let items = currentSpaceApps(mru: [])
         out.append("--- result (built in \(ms(listStart))) ---")
         for item in items {
-            out.append("\(item.name) wids=\(item.windowIDs) minimized=\(item.isMinimized) title=\(item.title ?? "<nil>")")
+            out.append("\(item.name) wids=\(item.windowIDs) state=\(item.state) desktop=\(item.spaceNumber.map(String.init) ?? "-") title=\(item.title ?? "<nil>")")
         }
         let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/TabStash-dump.txt")
         try? out.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
