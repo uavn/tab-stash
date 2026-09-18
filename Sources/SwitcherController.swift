@@ -4,7 +4,7 @@ import AppKit
 /// or a click commits, Esc cancels. Cmd+Q quits the highlighted app, Cmd+H hides it,
 /// Cmd+W closes the highlighted window, Cmd+M minimises it.
 final class SwitcherController {
-    private let panel = SwitcherPanel()
+    private lazy var panel: SwitcherPanel = makePanel()
     private var apps: [SpaceApp] = []
     private var selected = 0
     private(set) var isActive = false
@@ -30,6 +30,14 @@ final class SwitcherController {
             SpaceApps.rememberWindows(of: app.processIdentifier)
             self.noteFocusedWindow(of: app.processIdentifier)
         }
+    }
+
+    /// A panel wired to this controller. A fresh one is made for every opening: a
+    /// window made earlier can stay tied to the Space it was first shown on, despite
+    /// canJoinAllSpaces, and then opens there - invisible from any other Space. A new
+    /// window always appears on the Space in front.
+    private func makePanel() -> SwitcherPanel {
+        let panel = SwitcherPanel()
         panel.onHover = { [weak self] index in
             guard let self, self.isActive, index != self.selected, self.apps.indices.contains(index) else { return }
             self.selected = index
@@ -40,6 +48,7 @@ final class SwitcherController {
             self.selected = index
             self.commit()
         }
+        return panel
     }
 
     /// Moves a pid to the head of the MRU list. Called for our own activations
@@ -98,6 +107,9 @@ final class SwitcherController {
             } else {
                 selected = firstIsFront && apps.count > 1 ? 1 : 0
             }
+            // close(), not orderOut(): AppKit keeps every window that was never closed.
+            panel.close()
+            panel = makePanel()
             panel.show(apps: apps, selected: selected)
             watchForRelease()
         } else {
