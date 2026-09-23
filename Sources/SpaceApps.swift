@@ -52,6 +52,9 @@ enum SpaceApps {
     private static var confirmedWindows: [pid_t: Set<CGWindowID>] = [:]
     /// Window titles from earlier answers, for when there is no time to ask again.
     private static var titleCache: [CGWindowID: String] = [:]
+    /// Windows Accessibility owns up to but does not call proper windows - Chrome's
+    /// "Find in page" bar and the like. Remembered so they stay out from other Spaces too.
+    private static var rejectedWindows: [pid_t: Set<CGWindowID>] = [:]
     /// All Accessibility work while building one list must fit in this. A slow app
     /// answers each question within the per-call cap, but dozens of windows times that
     /// cap once held Cmd+Tab up for 15 seconds.
@@ -64,11 +67,11 @@ enum SpaceApps {
     /// never hold up key handling.
     static func rememberWindows(of pid: pid_t) {
         axQueue.async {
-            guard let ax = axWindows(pid: pid, deadline: Date().addingTimeInterval(1)), !ax.isEmpty else { return }
-            let ids = Set(ax.keys)
+            guard let ax = axWindows(pid: pid, deadline: Date().addingTimeInterval(1)), !ax.titles.isEmpty else { return }
             DispatchQueue.main.async {
-                confirmedWindows[pid] = ids
-                for (wid, title) in ax where !title.isEmpty { titleCache[wid] = title }
+                confirmedWindows[pid] = Set(ax.titles.keys)
+                rejectedWindows[pid] = ax.rejected
+                for (wid, title) in ax.titles where !title.isEmpty { titleCache[wid] = title }
             }
         }
     }
@@ -141,24 +144,33 @@ enum SpaceApps {
             // Control), or an app's internal scaffolding (Chrome) - and needs vouching for.
             // Accessibility vouches for minimised windows but answers only about the Space
             // in front, so its answers are remembered for looking from other Spaces.
-            var axAnswer: [CGWindowID: String]?
+            var axAnswer: AXWindows?
             let hereToo = windows.contains { !$0.elsewhere }
             if hereToo, windows.contains(where: { !$0.onscreen }) || !settings.groupWindows {
                 if Date() < axDeadline { axAnswer = axWindows(pid: pid, deadline: axDeadline) }
                 if let answer = axAnswer {
-                    confirmedWindows[pid] = Set(answer.keys)
-                    for (wid, title) in answer where !title.isEmpty { titleCache[wid] = title }
+                    confirmedWindows[pid] = Set(answer.titles.keys)
+                    rejectedWindows[pid] = answer.rejected
+                    for (wid, title) in answer.titles where !title.isEmpty { titleCache[wid] = title }
                 }
             }
-            let axTitles = axAnswer ?? [:]
+            let axTitles = axAnswer?.titles ?? [:]
+            let rejected = axAnswer?.rejected ?? rejectedWindows[pid] ?? []
             let known = confirmedWindows[pid]
             // Asked and got no answer (a busy app): keep what is here rather than lose it.
             let unanswered = hereToo && axAnswer == nil
             func present(_ w: WindowInfo) -> Bool { w.onscreen || (w.elsewhere && w.orderedIn) }
             let visible = windows.filter { win in
-                if present(win) { return true }
+                // Disowned by its own app: never a switcher entry, even while on screen.
+                if rejected.contains(win.wid) { return false }
+                // On another Space and placed there: a real window, whatever else we know.
+                if win.elsewhere && win.orderedIn { return true }
                 // Cmd+H: Accessibility lists nothing until the app is shown again.
-                if app.isHidden || (unanswered && known == nil && !win.elsewhere) { return true }
+                if app.isHidden { return true }
+                // The app answered in full, so its word is final: Chrome keeps on-screen
+                // scaffolding it never mentions, and that is not somewhere to switch to.
+                if let answer = axAnswer { return answer.titles[win.wid] != nil }
+                if win.onscreen || (unanswered && known == nil) { return true }
                 if win.title != nil { return true }
                 return known?.contains(win.wid) ?? false
             }
@@ -277,33 +289,50 @@ enum SpaceApps {
         return wid
     }
 
+    /// What an app says about its own windows.
+    struct AXWindows {
+        /// Windows worth switching to, with their titles.
+        var titles: [CGWindowID: String] = [:]
+        /// Listed, but not a window in its own right: a find bar, a palette, a popover.
+        var rejected: Set<CGWindowID> = []
+    }
+
     /// nil when the app gave no complete answer in time. A partial answer is never
     /// returned: windows missing from it would be taken for fakes and dropped.
-    private static func axWindows(pid: pid_t, deadline: Date = .distantFuture) -> [CGWindowID: String]? {
+    private static func axWindows(pid: pid_t, deadline: Date = .distantFuture) -> AXWindows? {
         let started = Date()
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement] else { return nil }
-        var titles: [CGWindowID: String] = [:]
+        var answer = AXWindows()
         for w in windows {
             guard Date() < deadline else {
                 let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
-                SlowLog.note("Accessibility: \(name) ran out of time after \(SlowLog.ms(since: started)) ms, \(titles.count) of \(windows.count) windows")
+                SlowLog.note("Accessibility: \(name) ran out of time after \(SlowLog.ms(since: started)) ms, \(answer.titles.count) of \(windows.count) windows")
                 return nil
             }
             var wid: CGWindowID = 0
             guard _AXUIElementGetWindow(w, &wid) == .success else { continue }
+            // Only a standard window or a dialog is something to switch to. Chrome files
+            // its "Find in page" bar as a window with the subrole AXUnknown.
+            var subroleRaw: CFTypeRef?
+            AXUIElementCopyAttributeValue(w, kAXSubroleAttribute as CFString, &subroleRaw)
+            let subrole = (subroleRaw as? String) ?? ""
+            guard subrole == "AXStandardWindow" || subrole == "AXDialog" else {
+                answer.rejected.insert(wid)
+                continue
+            }
             var raw: CFTypeRef?
             AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &raw)
-            titles[wid] = (raw as? String) ?? ""
+            answer.titles[wid] = (raw as? String) ?? ""
         }
         if Date().timeIntervalSince(started) > 0.1 {
             let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
             SlowLog.note("Accessibility: \(name) took \(SlowLog.ms(since: started)) ms for \(windows.count) windows")
         }
-        return titles
+        return answer
     }
 
     /// Diagnostics for `--dump`: every candidate window with the facts the filter
@@ -314,6 +343,9 @@ enum SpaceApps {
         out.append("currentSpaceOnly=\(settings.currentSpaceOnly) groupWindows=\(settings.groupWindows) "
             + "showMinimized=\(settings.showMinimized) sortOrder=\(settings.sortOrder)")
         out.append("active spaces: \(PrivateSpaces.activeSpaceIDs().sorted())")
+        for display in PrivateSpaces.displaySpaces() {
+            out.append("display \(display.displayID): current \(display.current), all \(display.spaces)")
+        }
         out.append("accessibility trusted: \(AXIsProcessTrusted())")
 
         let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
@@ -330,7 +362,8 @@ enum SpaceApps {
             let title = (w[kCGWindowName as String] as? String) ?? "<nil>"
             out.append("window wid=\(wid) pid=\(pid) \((w[kCGWindowOwnerName as String] as? String) ?? "?") "
                 + "\(Int(width))x\(Int(height)) onscreen=\((w[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false) "
-                + "spaces=\(PrivateSpaces.spaceIDs(forWindow: wid).sorted()) title='\(title)'")
+                + "spaces=\(PrivateSpaces.spaceIDs(forWindow: wid).sorted()) "
+                + "orderedIn=\(PrivateSpaces.isOrderedIn(wid).map(String.init) ?? "?") title='\(title)'")
         }
         func ms(_ start: Date) -> String { String(format: "%.0f ms", Date().timeIntervalSince(start) * 1000) }
         for pid in pids.sorted() {
@@ -340,9 +373,39 @@ enum SpaceApps {
             let took = ms(started)
             switch answer {
             case nil: out.append("ax pid=\(pid) \(name): no answer (\(took))")
-            case let map?: out.append("ax pid=\(pid) \(name): \(map.isEmpty ? "empty" : "\(map.count) windows") (\(took))")
+            case let map?: out.append("ax pid=\(pid) \(name): \(map.titles.isEmpty ? "no real windows" : "\(map.titles.count) windows")"
+                + "\(map.rejected.isEmpty ? "" : ", \(map.rejected.count) not switchable") (\(took))")
             }
         }
+        for pid in pids.sorted() {
+            let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?"
+            let appElement = AXUIElementCreateApplication(pid)
+            var raw: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &raw) == .success,
+                  let axWindowList = raw as? [AXUIElement], !axWindowList.isEmpty else { continue }
+            for window in axWindowList {
+                var wid: CGWindowID = 0
+                _ = _AXUIElementGetWindow(window, &wid)
+                func text(_ attribute: String) -> String {
+                    var value: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(window, attribute as CFString, &value) == .success,
+                          let value else { return "-" }
+                    if let string = value as? String { return string }
+                    if CFGetTypeID(value) == AXValueGetTypeID() {
+                        var size = CGSize.zero
+                        if AXValueGetValue(value as! AXValue, .cgSize, &size) { return "\(Int(size.width))x\(Int(size.height))" }
+                    }
+                    return "?"
+                }
+                var names: CFArray?
+                AXUIElementCopyAttributeNames(window, &names)
+                let attributes = (names as? [String]) ?? []
+                out.append("axwindow \(name) wid=\(wid) role=\(text(kAXRoleAttribute)) subrole=\(text(kAXSubroleAttribute)) "
+                    + "size=\(text(kAXSizeAttribute)) close=\(attributes.contains(kAXCloseButtonAttribute)) "
+                    + "minimizeButton=\(attributes.contains(kAXMinimizeButtonAttribute)) title='\(text(kAXTitleAttribute).prefix(40))'")
+            }
+        }
+
         let focusStart = Date()
         _ = focusedWindowOfFrontApp()
         out.append("focused window lookup: \(ms(focusStart))")
