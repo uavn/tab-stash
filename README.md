@@ -48,7 +48,7 @@ The app lives in the menu bar and needs Accessibility access
 | Esc | close without switching |
 | Cmd+Q, Cmd+H | quit / hide the selected app |
 | Cmd+W, Cmd+M | close / minimize the selected window |
-| mouse | hover to select, click to switch |
+| mouse | hover to select, click to switch (off by default) |
 
 A small tag on the lower edge of an icon marks a minimized window, a hidden app, or a
 window on another Space (→ 2 for desktop 2).
@@ -60,6 +60,7 @@ Menu bar icon → "Settings…":
 - **Show only apps from the current Space** — off lists every Space, like the system switcher.
 - **Group all windows of an app** — off gives each window its own entry.
 - **Show minimized and hidden apps** — dimmed entries; picking one brings the window back.
+- **Select with the pointer** — off by default; on, hovering highlights an entry and a click switches to it.
 - **Order** — recently used, name, or window order.
 - **Appearance** and **Glass** — follow the system, or pin light/dark and how solid the panel is.
 - **App list** — every app the switcher has shown; uncheck one to hide it for good.

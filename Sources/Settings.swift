@@ -14,6 +14,7 @@ final class Settings {
         static let appearance = "appearance"
         static let sortOrder = "sortOrder"
         static let glassOpacity = "glassOpacity"
+        static let mouseSelection = "mouseSelection"
     }
 
     init() {
@@ -44,6 +45,13 @@ final class Settings {
     var glassOpacity: Double {
         get { d.object(forKey: Key.glassOpacity) as? Double ?? 1 }
         set { d.set(newValue, forKey: Key.glassOpacity) }
+    }
+
+    /// Let the pointer pick an entry: hover selects, click switches. Off by default,
+    /// so a pointer resting over the panel cannot take the selection from the keys.
+    var mouseSelection: Bool {
+        get { d.bool(forKey: Key.mouseSelection) }
+        set { d.set(newValue, forKey: Key.mouseSelection) }
     }
 
     /// Order of the icons: "recent" (default), "name" or "windows".

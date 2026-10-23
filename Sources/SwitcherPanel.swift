@@ -22,9 +22,10 @@ final class SwitcherPanel: NSPanel {
     private var items: [ItemView] = []
     private var apps: [SpaceApp] = []
 
-    /// Pointer moved onto an item / clicked one.
+    /// Pointer moved onto an item / clicked one. Silent unless the setting is on.
     var onHover: ((Int) -> Void)?
     var onClick: ((Int) -> Void)?
+    private var mouseSelection = false
     /// Where the pointer was when the panel opened: it may be resting where an item
     /// appears, and that alone must not change the selection.
     private var pointerAtShow = NSPoint.zero
@@ -108,6 +109,8 @@ final class SwitcherPanel: NSPanel {
     func show(apps: [SpaceApp], selected: Int) {
         // Re-read on every open so a change in Settings needs no restart.
         appearance = Self.chosenAppearance()
+        mouseSelection = Settings.shared.mouseSelection
+        ignoresMouseEvents = !mouseSelection
         applyGlassStyle()
         applyBackdropOpacity()
         self.apps = apps
@@ -166,11 +169,12 @@ final class SwitcherPanel: NSPanel {
     }
 
     fileprivate func pointerOver(_ index: Int) {
-        guard NSEvent.mouseLocation != pointerAtShow else { return }
+        guard mouseSelection, NSEvent.mouseLocation != pointerAtShow else { return }
         onHover?(index)
     }
 
     fileprivate func clicked(_ index: Int) {
+        guard mouseSelection else { return }
         onClick?(index)
     }
 

@@ -7,6 +7,7 @@ final class SettingsWindowController: NSWindowController {
     private let minimizedBox = NSButton(checkboxWithTitle: "Show minimized and hidden (Cmd+H) apps", target: nil, action: nil)
     private let spaceBox = NSButton(checkboxWithTitle: "Show only apps from the current Space", target: nil, action: nil)
     private let groupBox = NSButton(checkboxWithTitle: "Group all windows of an app into one entry", target: nil, action: nil)
+    private let mouseBox = NSButton(checkboxWithTitle: "Select with the pointer: hover to highlight, click to switch", target: nil, action: nil)
     private let appearanceButton = NSPopUpButton()
     private let sortButton = NSPopUpButton()
     private let glassButton = NSPopUpButton()
@@ -43,6 +44,8 @@ final class SettingsWindowController: NSWindowController {
         groupBox.target = self; groupBox.action = #selector(toggleGroup)
         spaceBox.toolTip = "Off lists apps from every Space, like the system Cmd+Tab."
         groupBox.toolTip = "Off gives every window its own entry, labelled with the window title."
+        mouseBox.target = self; mouseBox.action = #selector(toggleMouse)
+        mouseBox.toolTip = "Off by default: with it on, a pointer that happens to rest over the panel takes the selection from the keys."
 
         appearanceButton.addItems(withTitles: ["System", "Light", "Dark"])
         appearanceButton.target = self
@@ -99,12 +102,12 @@ final class SettingsWindowController: NSWindowController {
         buttons.orientation = .horizontal
         buttons.distribution = .fill
 
-        let root = NSStackView(views: [spaceBox, groupBox, minimizedBox, appearanceRow, header, hint, scroll, buttons])
+        let root = NSStackView(views: [spaceBox, groupBox, minimizedBox, mouseBox, appearanceRow, header, hint, scroll, buttons])
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 10
         root.spacing = 8
-        root.setCustomSpacing(12, after: minimizedBox)
+        root.setCustomSpacing(12, after: mouseBox)
         root.setCustomSpacing(18, after: appearanceRow)
         root.setCustomSpacing(4, after: header)
         root.translatesAutoresizingMaskIntoConstraints = false
@@ -161,6 +164,7 @@ final class SettingsWindowController: NSWindowController {
         minimizedBox.state = settings.showMinimized ? .on : .off
         spaceBox.state = settings.currentSpaceOnly ? .on : .off
         groupBox.state = settings.groupWindows ? .on : .off
+        mouseBox.state = settings.mouseSelection ? .on : .off
         appearanceButton.selectItem(at: Self.appearanceOrder.firstIndex(of: settings.appearance) ?? 0)
         sortButton.selectItem(at: Self.sortOrders.firstIndex(of: settings.sortOrder) ?? 0)
         glassButton.selectItem(at: Self.glassLevels.firstIndex { abs($0 - settings.glassOpacity) < 0.01 } ?? 0)
@@ -193,6 +197,7 @@ final class SettingsWindowController: NSWindowController {
     @objc private func toggleMinimized() { settings.showMinimized = minimizedBox.state == .on }
     @objc private func toggleSpace() { settings.currentSpaceOnly = spaceBox.state == .on }
     @objc private func toggleGroup() { settings.groupWindows = groupBox.state == .on }
+    @objc private func toggleMouse() { settings.mouseSelection = mouseBox.state == .on }
 
     private static let glassLevels = [1.0, 0.7, 0.45]
     @objc private func changeGlass() {
